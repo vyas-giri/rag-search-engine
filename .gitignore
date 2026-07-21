@@ -12,3 +12,6 @@ wheels/
 # temp/regeneratable files
 /data/
 /cache/
+
+# env vars
+.env

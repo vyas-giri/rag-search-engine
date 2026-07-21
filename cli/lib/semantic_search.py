@@ -5,10 +5,9 @@ from torch import Tensor
 import numpy as np
 import os
 from lib.constants import CACHE_PATH, SCORE_PRECISION
-from lib.keyword_search import load_movies
 import re
 import json
-from lib.constants import DEFAULT_CHUNK_OVERLAP, DEFAULT_SEMANTIC_CHUNK_SIZE
+from lib.constants import DEFAULT_CHUNK_OVERLAP, DEFAULT_SEMANTIC_CHUNK_SIZE, load_movies
 
 
 class SemanticSearch:

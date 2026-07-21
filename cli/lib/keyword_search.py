@@ -4,7 +4,6 @@ from nltk.stem import PorterStemmer
 from lib.constants import BM25_B, BM25_K1, CACHE_PATH, STOPWORDS, DATA_PATH
 import pickle
 import math
-import json
 import string
 import os
 
@@ -14,6 +13,7 @@ class InvertedIndex:
     docmap: dict[int, dict] = {}
     term_frequencies: dict[int, collections.Counter] = {}
     doc_lengths: dict[int, int] = {}
+    index_path: str = os.path.join(CACHE_PATH, "index.pkl")
 
     def __init__(self):
         self.index = {}
@@ -177,8 +177,3 @@ def preprocessing_and_tokenisation(text: str) -> list[str]:
     stemmer = PorterStemmer()
     stemmed_tokens = [stemmer.stem(token) for token in tokenized_text]
     return stemmed_tokens
-
-def load_movies() -> list[dict]:
-    with open(DATA_PATH, "r") as f:
-        data = json.load(f)
-    return data["movies"]
