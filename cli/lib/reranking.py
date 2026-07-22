@@ -113,4 +113,34 @@ def cross_encoder_rerank(results: list[dict], query: str, limit: int = DEFAULT_Q
         doc["crossEncoderScore"] = score
     
     sorted_docs = sorted(results, key=lambda x: x["crossEncoderScore"], reverse=True)
+    #print(f"Cross encoder results: {[doc['title'] for doc in sorted_docs]}")  # debugging
     return sorted_docs[:limit]
+
+def evaluate_results(results: list[dict], query: str) -> None:
+    prompt = f"""Rate how relevant each result is to this query on a 0-3 scale:
+
+            Query: "{query}"
+
+            Results:
+            {chr(10).join(result.get('title', '') for result in results)}
+
+            Scale:
+            - 3: Highly relevant
+            - 2: Relevant
+            - 1: Marginally relevant
+            - 0: Not relevant
+
+            Do NOT give any numbers other than 0, 1, 2, or 3.
+
+            Return ONLY the scores in the same order you were given the documents. Return a valid JSON list, nothing else. For example:
+
+            [2, 0, 3, 2, 0, 1]"""
+
+    response = client.chat.completions.create(
+        model=OPEN_ROUTER_FREE_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw_content = response.choices[0].message.content.strip()
+    content = json.loads(raw_content)
+    for i, (eval, result) in enumerate(zip(content, results), start=1):
+        print(f"{i}. {result.get('title', '')}: {eval}/3")

@@ -4,7 +4,7 @@ from lib.keyword_search import InvertedIndex
 from lib.semantic_search import ChunkedSemanticSearch
 from lib.constants import ALPHA, SCORE_PRECISION, K_PARAMETER, DEFAULT_QUERY_LIMIT, load_movies
 from lib.query_enhancement import correct_spelling, enhance_query
-from lib.reranking import rerank_results
+from lib.reranking import rerank_results, evaluate_results
 
 class HybridSearch:
     def __init__(self, documents: list[dict]) -> None:
@@ -53,7 +53,7 @@ class HybridSearch:
         return sorted_docs[:limit]
 
 
-    def rrf_search(self, query: str, k: int, limit: int = 10) -> list[dict]:
+    def rrf_search(self, query: str, k: int = K_PARAMETER, limit: int = DEFAULT_QUERY_LIMIT) -> list[dict]:
         extendedLimit = limit * 500
         bm25_results = self._bm25_search(query, extendedLimit)
         semantic_results = self.semantic_search.search_chunks(query, extendedLimit)
@@ -113,19 +113,29 @@ def weighted_search_command(query: str, alpha: float = ALPHA, limit: int = 5) ->
         print(f"   BM25: {doc['bm25Score']:.3f}, Semantic: {doc['semanticScore']:.3f}")
         print(f"   {doc['description'][:100]}...\n")
 
-def rrf_search_command(query: str, k: int = K_PARAMETER, limit: int = DEFAULT_QUERY_LIMIT, enhance: str = None, rerank_method: str = None) -> list[dict]:
+def perform_rrf_search(query: str, k: int = K_PARAMETER, limit: int = DEFAULT_QUERY_LIMIT, enhance: str = None, rerank_method: str = None, evaluate: bool = False) -> list[dict]:
     documents = load_movies()
     hybrid_search = HybridSearch(documents)
+    #print(f"Query: {query}") # debugging
 
     if enhance is not None:
         query = enhance_query(query, enhance)
+        #print(f"Enhanced Query: {query}") # debugging
     
     if rerank_method is not None:
         limit *= 5  # Increase limit for reranking
     
     res = hybrid_search.rrf_search(query, k, limit)
+    #print(f"Initial RRF Results (limit={limit}): {[doc['title'] for doc in res]}")  # debugging
+
     if rerank_method is not None:
         res = rerank_results(res, rerank_method, query, limit // 5)
+    
+    return res
+
+def rrf_search_command(query: str, k: int = K_PARAMETER, limit: int = DEFAULT_QUERY_LIMIT, enhance: str = None, rerank_method: str = None, evaluate: bool = False) -> None:
+    res = perform_rrf_search(query, k, limit, enhance, rerank_method, evaluate)
+
     for i, doc in enumerate(res, start=1):
         print(f"{i}. {doc['title']}")
 
@@ -140,3 +150,6 @@ def rrf_search_command(query: str, k: int = K_PARAMETER, limit: int = DEFAULT_QU
         print(f"   RRF Score: {doc['rrfScore']:.3f}")
         print(f"   BM25 Rank: {doc['bm25Rank']}, Semantic Rank: {doc['semanticRank']}")
         print(f"   {doc['description'][:100]}...\n")
+
+    if evaluate:
+        evaluate_results(res, query)
