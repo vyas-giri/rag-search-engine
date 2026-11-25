@@ -14,7 +14,7 @@ reproducible retrieval benchmark.
 | Retrieval metrics (P/R/MRR/nDCG, latency) + unit tests | ✅ Done | `src/evaluation/`, `tests/` |
 | LLM generation, query rewriting, LLM reranking | 🧪 Experimental | `cli/lib/` |
 | Multimodal (image → movie) search | 🧪 Experimental | `cli/lib/multimodal_search.py` |
-| Qdrant vector store | ⏳ Phase 2 | |
+| Qdrant vector store (dense chunks, grouped by movie) | ✅ Done | `src/retrieval/vector_store.py` |
 | LangGraph agent (route → retrieve → grade → rewrite → generate) | ⏳ Phase 3 | |
 | FastAPI service + Next.js UI | ⏳ Phase 4 | |
 | RAGAS answer evaluation | ⏳ Phase 5 | |
@@ -22,18 +22,49 @@ reproducible retrieval benchmark.
 
 ## Retrieval benchmark
 
-10-query golden set, k=5, same machine and cached embeddings.
+10-query golden set, k=5. All rows measured in one session, with one untimed
+warm-up query; latency is the median per query.
 
-| Configuration | P@5 | R@5 | MRR@5 | nDCG@5 | Latency |
+| Configuration | P@5 | R@5 | MRR@5 | nDCG@5 | p50 latency |
 |---|---:|---:|---:|---:|---:|
-| BM25 | 0.420 | 0.541 | 0.783 | 0.667 | ~1,160 ms |
-| Dense (all-MiniLM-L6-v2, chunked) | 0.320 | 0.461 | 0.758 | 0.551 | ~440 ms |
-| Hybrid, original (intersection RRF) | 0.420 | 0.551 | 0.825 | 0.670 | ~3,940 ms |
-| **Hybrid, union RRF** | **0.440** | **0.567** | 0.808 | **0.678** | **~1,660 ms** |
-| Hybrid + cross-encoder (5 candidates) | 0.440 | 0.567 | 0.950 | 0.716 | ~2,160 ms |
-| Hybrid + cross-encoder (20 candidates) | 0.400 | 0.509 | 0.950 | 0.679 | ~2,200 ms |
+| BM25 | 0.420 | 0.541 | 0.783 | 0.667 | 1,782 ms |
+| Dense, in-process (all-MiniLM-L6-v2, 72,909 chunks) | 0.320 | 0.461 | 0.758 | 0.551 | 546 ms |
+| **Dense, Qdrant (HNSW, `hnsw_ef=512`)** | 0.320 | 0.461 | 0.758 | 0.551 | **62 ms** |
+| Hybrid, in-process dense (union RRF) | 0.440 | 0.567 | 0.808 | 0.678 | 1,765 ms |
+| **Hybrid, Qdrant dense (union RRF)** | **0.440** | **0.567** | 0.808 | **0.678** | **1,313 ms** |
+| Hybrid Qdrant + cross-encoder (5 candidates) | 0.440 | 0.567 | 0.950 | 0.716 | 1,390 ms |
+| Hybrid Qdrant + cross-encoder (20 candidates) | 0.400 | 0.509 | 0.950 | 0.679 | 1,347 ms |
 
-What changed from the original hybrid search, and why it got 2.4x faster:
+Absolute latencies vary by ±50% between runs on a shared desktop; the ratios
+between rows are stable. In a quieter run Qdrant dense measured 15 ms vs 420 ms.
+
+### Phase 2: Qdrant
+
+- **Same quality, ~9-28x faster dense search.** Qdrant stores the same cached
+  vectors (one point per chunk) and groups hits by `movie_id` on the server,
+  so each movie is scored by its best chunk. Metrics are identical to the
+  in-process search, and hybrid results match on all 10 queries.
+- **HNSW is approximate, so `hnsw_ef` was tuned.** HNSW is Qdrant's
+  approximate nearest-neighbour index, and `hnsw_ef` is how many candidates it
+  explores per query. With Qdrant's default, its top-100 movies overlapped
+  exact search by only 88% (hybrid uses 100 candidates):
+
+  | Search | Overlap@100 with exact | Search time |
+  |---|---:|---:|
+  | HNSW, default | 0.884 | 9 ms |
+  | HNSW, `hnsw_ef=256` | 0.967 | 11 ms |
+  | **HNSW, `hnsw_ef=512`** | **0.991** | **17 ms** |
+  | Exact (brute force) | 1.000 | 22 ms |
+
+  At 73k points exact search is still cheap; HNSW matters as the catalog grows.
+- **BM25 is now the bottleneck.** It accounts for nearly all of hybrid's
+  latency (a pure-Python loop over every document). Moving BM25 into Qdrant as
+  sparse vectors is the next optimization.
+
+### Phase 1: hybrid fixes
+
+Union RRF improved nDCG@5 from 0.670 to 0.678 and cut hybrid latency from
+~3.9 s to ~1.7 s. What changed from the original hybrid search:
 
 - **Union instead of intersection.** The original scored only documents found
   by *both* retrievers. RRF now scores the union, so keyword-only or
@@ -53,12 +84,13 @@ reranker configuration.
 Reproduce:
 
 ```bash
-uv run python -m src.retrieval.evaluate --retriever hybrid --k 5
-uv run python -m src.retrieval.evaluate --retriever hybrid \
+uv run python -m src.retrieval.evaluate --retriever hybrid_qdrant --k 5
+uv run python -m src.retrieval.evaluate --retriever hybrid_qdrant \
   --reranker cross_encoder --k 5 --candidates 20
 ```
 
-`--retriever` accepts `bm25`, `dense` or `hybrid`.
+`--retriever` accepts `bm25`, `dense`, `qdrant`, `hybrid` or `hybrid_qdrant`.
+The Qdrant options need the setup below.
 
 ## Setup
 
@@ -77,6 +109,18 @@ uv run pytest
 
 Indexes and embeddings are built into `cache/` on first run, and models are
 downloaded on first use. Setting `HF_TOKEN` avoids Hugging Face rate limits.
+
+**Qdrant.** Start the server, then load the cached chunk embeddings into it
+(about 30 s, no re-embedding):
+
+```bash
+docker compose up -d                        # Qdrant 1.20 on :6333, data in ./qdrant_storage
+uv run python -m src.retrieval.ingest       # add --recreate to rebuild
+curl -s localhost:6333/collections/movie_chunks   # expect points_count 72909
+```
+
+The dashboard is at http://localhost:6333/dashboard. Set `QDRANT_URL` to use
+a different server. Unit tests use Qdrant's in-memory mode and need no server.
 
 **LLM features.** Generation, query rewriting and LLM reranking need an
 OpenRouter key in `.env` (never committed):
@@ -116,10 +160,12 @@ Each script supports `--help`.
 
 ```text
 src/
-  retrieval/     # Retriever protocol; BM25, dense, hybrid, fusion, reranker, evaluator
+  retrieval/     # Retriever protocol; BM25, dense, Qdrant, hybrid, fusion,
+                 # reranker, ingest and evaluator
   evaluation/    # Ranking metrics
-tests/unit/      # Fusion, metrics and LLM-client tests
+tests/unit/      # Fusion, metrics, vector store and LLM-client tests
 cli/             # Original CLI tools; cli/lib holds the underlying implementations
+docker-compose.yml
 ```
 
 `src/` is the application layer that new features go into. Its BM25 and dense
@@ -130,9 +176,10 @@ one capability at a time.
 
 1. **Phase 1 (finish):** validated dataset loading; commit the golden set so
    CI can evaluate; grow it to ~30 queries.
-2. **Phase 2, Qdrant:** move dense vectors (one point per chunk) into Qdrant
-   behind `src/retrieval/vector_store.py`, then benchmark it, including
-   Qdrant-native hybrid search, against the table above.
+2. **Phase 2, Qdrant:** ✅ dense retrieval in Qdrant, benchmarked above.
+   Follow-up: BM25 as Qdrant sparse vectors (a movie-level collection with
+   the IDF modifier), so that server-side prefetch + RRF fusion can be
+   compared against the Python RRF and the BM25 bottleneck goes away.
 3. **Phase 3, agent:** a LangGraph workflow (route → retrieve → grade →
    rewrite → generate) with bounded retries, an explicit
    insufficient-information answer, and citations validated against

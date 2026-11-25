@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import statistics
 import time
 from pathlib import Path
 from typing import Any
@@ -13,10 +14,28 @@ from .bm25 import BM25Retriever
 from .dense import DenseRetriever
 from .hybrid import HybridRetriever
 from .reranker import rerank
+from .types import Retriever
 
 ROOT = Path(__file__).resolve().parents[2]
 DATASET_PATH = ROOT / "data" / "golden_dataset.json"
 DEFAULT_RERANK_CANDIDATES = 20
+RETRIEVERS = ("bm25", "dense", "hybrid", "qdrant", "hybrid_qdrant")
+
+
+def build_retriever(name: str, documents: list[dict]) -> Retriever:
+    """Construct a retriever by name. Qdrant is imported only when requested."""
+    if name == "bm25":
+        return BM25Retriever(documents)
+    if name == "dense":
+        return DenseRetriever(documents)
+    if name == "hybrid":
+        return HybridRetriever(documents)
+    if name in ("qdrant", "hybrid_qdrant"):
+        from .vector_store import QdrantDenseRetriever
+
+        qdrant = QdrantDenseRetriever(documents)
+        return qdrant if name == "qdrant" else HybridRetriever(documents, dense=qdrant)
+    raise ValueError(f"Unsupported retriever: {name}")
 
 
 def evaluate(
@@ -40,18 +59,15 @@ def evaluate(
         raise ValueError(f"candidates ({candidates}) must be >= k ({k})")
 
     documents = load_movies()
-    retrievers = {
-        "bm25": BM25Retriever,
-        "dense": DenseRetriever,
-        "hybrid": HybridRetriever,
-    }
-    try:
-        retriever = retrievers[retriever_name](documents)
-    except KeyError as exc:
-        raise ValueError(f"Unsupported retriever: {retriever_name}") from exc
+    retriever = build_retriever(retriever_name, documents)
 
     with DATASET_PATH.open() as dataset_file:
         cases = json.load(dataset_file)["test_cases"]
+    # Untimed warm-up so one-off costs (lazy model init, cold index pages)
+    # are not charged to the first golden query.
+    if cases:
+        rerank(retriever.retrieve(cases[0]["query"], candidates), cases[0]["query"], reranker_name, k)
+
     queries = []
     for case in cases:
         started = time.perf_counter()
@@ -72,6 +88,9 @@ def evaluate(
         name: sum(query[name] for query in queries) / len(queries) if queries else 0.0
         for name in metric_names
     }
+    aggregate["latency_p50_ms"] = (
+        statistics.median(query["latency_ms"] for query in queries) if queries else 0.0
+    )
     return {
         "retriever": retriever_name,
         "reranker": reranker_name,
@@ -84,7 +103,7 @@ def evaluate(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate retrieval quality.")
-    parser.add_argument("--retriever", choices=("bm25", "dense", "hybrid"), default="hybrid")
+    parser.add_argument("--retriever", choices=RETRIEVERS, default="hybrid")
     parser.add_argument("--reranker", choices=("none", "cross_encoder"), default="none")
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument(

@@ -15,3 +15,5 @@ wheels/
 
 # env vars
 .env
+# local Qdrant data (docker bind mount)
+/qdrant_storage/
