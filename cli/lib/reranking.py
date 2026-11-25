@@ -1,21 +1,10 @@
-import os
-from dotenv import load_dotenv
-from openai import OpenAI
+from lib.llm_client import get_client
 from lib.constants import OPEN_ROUTER_FREE_MODEL, DEFAULT_QUERY_LIMIT, OPEN_ROUTER_BASE_URL, CROSS_ENCODER_MODEL
 import time
 import json
 from sentence_transformers import CrossEncoder
 
 
-load_dotenv()
-api_key = os.environ.get("OPENROUTER_API_KEY")
-if not api_key:
-    raise RuntimeError("OPENROUTER_API_KEY environment variable not set")
-
-client = OpenAI(
-    base_url=OPEN_ROUTER_BASE_URL,
-    api_key=api_key,
-)
 
 prompts = {
     "individual": """Rate how well this movie matches the search query.
@@ -67,7 +56,7 @@ def rerank_results(results: list[dict], rerank_method: str, query: str, limit: i
 def individual_rerank(results: list[dict], query: str, limit: int = DEFAULT_QUERY_LIMIT) -> list[dict]:
     for doc in results:
         prompt = prompts["individual"].format(query=query, title=doc.get("title", ""), description=doc.get("description", ""))
-        response = client.chat.completions.create(
+        response = get_client().chat.completions.create(
             model=OPEN_ROUTER_FREE_MODEL,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -84,7 +73,7 @@ def individual_rerank(results: list[dict], query: str, limit: int = DEFAULT_QUER
 def batch_rerank(results: list[dict], query: str, limit: int = DEFAULT_QUERY_LIMIT) -> list[dict]:
     doc_list_str = "\n".join([f"{doc.get('id', '')}: {doc.get('title', '')} - {doc.get('description', '')}" for doc in results])
     prompt = prompts["batch"].format(query=query, doc_list_str=doc_list_str)
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model=OPEN_ROUTER_FREE_MODEL,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -136,7 +125,7 @@ def evaluate_results(results: list[dict], query: str) -> None:
 
             [2, 0, 3, 2, 0, 1]"""
 
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model=OPEN_ROUTER_FREE_MODEL,
         messages=[{"role": "user", "content": prompt}],
     )

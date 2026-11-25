@@ -15,7 +15,8 @@ generation. The target is a measurable, grounded, observable agentic RAG service
 | Cross-encoder reranking | Implemented experimentally | `cli/lib/reranking.py` |
 | LLM generation through OpenRouter | Implemented experimentally | `cli/lib/augmented_generation.py` |
 | Multimodal image search | Implemented experimentally | `cli/lib/multimodal_search.py` |
-| Typed retrieval adapters | In progress | `src/retrieval/` |
+| Typed retrieval adapters | Implemented | `src/retrieval/` (union RRF in `src/retrieval/fusion.py`) |
+| Retrieval metrics and unit tests | Implemented | `src/evaluation/retrieval.py`, `tests/unit/` |
 | Qdrant vector database | Planned | Phase 2 |
 | LangGraph agent workflow | Planned | Phase 3 |
 | FastAPI service | Planned | Phase 4 |
@@ -191,6 +192,68 @@ These are local baselines, not production SLOs. They are useful for comparing
 future changes such as Qdrant indexing, candidate-pool sizing, and reranker
 optimization.
 
+### Phase 1 foundation fixes: before/after
+
+The original hybrid path in `cli/lib/hybrid_search.py` had four problems:
+
+1. **Intersection instead of union.** Only documents returned by *both* BM25
+   and dense retrieval were scored. Standard RRF scores the union, so a strong
+   keyword-only or semantic-only match is not dropped.
+2. **Quadratic fusion.** For each of 5,000 documents it scanned both ranked
+   lists (up to 2,500 entries each) with `next(...)` to find its rank.
+3. **Index reloaded per query.** `_bm25_search` unpickled the whole inverted
+   index on every query.
+4. **Rounded sort key.** Results were sorted on `round(rrfScore, 3)`. RRF
+   scores sit between roughly 0.016 and 0.033, so rounding created ties that
+   were then broken by movie id instead of relevance.
+
+`src/retrieval/fusion.py` replaces this with a pure `reciprocal_rank_fusion()`
+over rank maps: union semantics, unrounded scores, deterministic tie-breaking,
+and per-source ranks kept for explainability. `HybridRetriever` takes the
+top 100 candidates from each retriever, loads indexes once, and returns full
+movie records. The dense adapter previously returned descriptions truncated to
+100 characters; it now returns full descriptions, which the reranker and
+future generator need.
+
+The evaluator also had a reranking bug: it retrieved only `k` documents before
+cross-encoder reranking, so reranking could reorder the top 5 but never
+surface anything new. It now retrieves `--candidates` documents first
+(default 20 when a reranker is used).
+
+Measured on the 10-query golden set, k=5, same machine, same cached embeddings:
+
+| Configuration | P@5 | R@5 | MRR@5 | nDCG@5 | Latency (ms/query) |
+|---|---:|---:|---:|---:|---:|
+| BM25 only | 0.420 | 0.541 | 0.783 | 0.667 | ~1,160 |
+| Dense only | 0.320 | 0.461 | 0.758 | 0.551 | ~440 |
+| Hybrid, before (intersection RRF) | 0.420 | 0.551 | 0.825 | 0.670 | ~3,940 |
+| **Hybrid, after (union RRF)** | **0.440** | **0.567** | 0.808 | **0.678** | **~1,660** |
+| Hybrid + cross-encoder, before (5 candidates) | 0.420 | 0.551 | 0.950 | 0.702 | ~5,310 |
+| Hybrid + cross-encoder, after (5 candidates) | 0.440 | 0.567 | 0.950 | 0.716 | ~2,160 |
+| Hybrid + cross-encoder, after (20 candidates) | 0.400 | 0.509 | 0.950 | 0.679 | ~2,200 |
+
+Reproduce with:
+
+```bash
+uv run python -m src.retrieval.evaluate --retriever hybrid --k 5
+uv run python -m src.retrieval.evaluate --retriever hybrid \
+  --reranker cross_encoder --k 5 --candidates 20
+```
+
+What the numbers say:
+
+- Union RRF is a small quality gain and a ~2.4x latency reduction. Hybrid
+  latency is now roughly BM25 + dense; fusion itself takes milliseconds. The
+  remaining cost is the pure-Python BM25 loop over all documents and the
+  per-chunk cosine loop in dense search. Phase 2 (Qdrant) targets the latter.
+- Reranking 20 candidates scores *lower* than reranking 5. Inspecting the
+  results shows the cross-encoder surfacing plausible but unlabeled titles,
+  e.g. *Resident Evil: Apocalypse* for "zombie apocalypse" and
+  *The Wedding Planner* for "romantic comedy wedding". With only 10 queries and
+  incomplete relevance lists, this comparison is not conclusive. Expanding the
+  golden set is required before choosing a reranker configuration.
+- Ten queries are too few for differences of ~0.01 nDCG to be significant.
+
 ### Baseline limitations
 
 - The dataset's relevance lists are incomplete for broad queries, so recall is
@@ -199,7 +262,9 @@ optimization.
   in-process inverted index.
 - Cross-encoder reranking improves ranking metrics but is currently expensive.
 - There is no answer-level faithfulness or citation evaluation yet.
-- There is no API, agent graph, tracing, or automated test suite yet.
+- There is no API, agent graph, or tracing yet. Unit tests cover fusion,
+  metrics, and lazy LLM client creation (`uv run pytest`).
+- The golden set has 10 queries with incomplete relevance lists.
 
 ## First end-to-end user flow
 
@@ -375,14 +440,18 @@ writing the tests.
 
 ### Phase 1 completion checklist
 
-- [ ] `cli/` still works unchanged.
-- [ ] `src/retrieval/` exposes typed retriever interfaces.
-- [ ] BM25, dense, hybrid, and cross-encoder paths share a result contract.
-- [ ] Evaluation reports Precision, Recall, MRR, nDCG, and latency.
-- [ ] Metrics have unit tests.
-- [ ] A retrieval regression report can be reproduced locally.
-- [ ] No generated cache or secret files are committed.
-- [ ] README contains the before/after metric table.
+- [x] `cli/` still works. LLM clients are now created lazily, so importing
+  LLM helpers no longer requires `OPENROUTER_API_KEY`.
+- [x] `src/retrieval/` exposes typed retriever interfaces.
+- [x] BM25, dense, hybrid, and cross-encoder paths share a result contract.
+- [x] Evaluation reports Precision, Recall, MRR, nDCG, and latency.
+- [x] Metrics have unit tests.
+- [x] A retrieval regression report can be reproduced locally.
+- [x] No generated cache or secret files are committed.
+- [x] README contains the before/after metric table.
+- [ ] Dataset loading is validated (Task 2), and `golden_dataset.json` is
+  committed so CI can run evaluation. `data/` is currently gitignored.
+- [ ] Golden set expanded beyond 10 queries.
 
 ## Future phases
 
@@ -435,6 +504,12 @@ uv run python -m src.retrieval.evaluate \
   --retriever hybrid \
   --reranker none \
   --k 5
+```
+
+Run the tests:
+
+```bash
+uv run pytest
 ```
 
 Environment variables for the experimental LLM commands belong in `.env` and

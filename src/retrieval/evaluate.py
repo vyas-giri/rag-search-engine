@@ -2,10 +2,11 @@
 
 import argparse
 import json
-import math
 import time
 from pathlib import Path
 from typing import Any
+
+from src.evaluation.retrieval import retrieval_metrics
 
 from ._compat import load_movies
 from .bm25 import BM25Retriever
@@ -15,35 +16,29 @@ from .reranker import rerank
 
 ROOT = Path(__file__).resolve().parents[2]
 DATASET_PATH = ROOT / "data" / "golden_dataset.json"
-
-
-def _metrics(results: list[dict], relevant: list[str], k: int) -> dict[str, float]:
-    retrieved = [doc.get("title", "") for doc in results[:k]]
-    relevant_set = set(relevant)
-    hits = [title for title in retrieved if title in relevant_set]
-    precision = len(hits) / k if k else 0.0
-    recall = len(set(hits)) / len(relevant_set) if relevant_set else 0.0
-    reciprocal_rank = next(
-        (1.0 / rank for rank, title in enumerate(retrieved, 1) if title in relevant_set),
-        0.0,
-    )
-    dcg = sum(
-        (1.0 if title in relevant_set else 0.0) / math.log2(rank + 1)
-        for rank, title in enumerate(retrieved, 1)
-    )
-    ideal = min(k, len(relevant_set))
-    idcg = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal + 1))
-    return {
-        "precision": precision,
-        "recall": recall,
-        "mrr": reciprocal_rank,
-        "ndcg": dcg / idcg if idcg else 0.0,
-    }
+DEFAULT_RERANK_CANDIDATES = 20
 
 
 def evaluate(
-    retriever_name: str = "hybrid", reranker_name: str = "none", k: int = 5
+    retriever_name: str = "hybrid",
+    reranker_name: str = "none",
+    k: int = 5,
+    candidates: int | None = None,
 ) -> dict[str, Any]:
+    """Run every golden query and report per-query and mean metrics.
+
+    ``candidates`` is how many documents the retriever returns before
+    reranking. It defaults to ``k`` without a reranker and to
+    ``max(k, 20)`` with one; reranking only ``k`` documents could reorder
+    them but never surface anything new.
+    """
+    if k < 1:
+        raise ValueError(f"k must be at least 1, got {k}")
+    if candidates is None:
+        candidates = k if reranker_name == "none" else max(k, DEFAULT_RERANK_CANDIDATES)
+    if candidates < k:
+        raise ValueError(f"candidates ({candidates}) must be >= k ({k})")
+
     documents = load_movies()
     retrievers = {
         "bm25": BM25Retriever,
@@ -60,15 +55,16 @@ def evaluate(
     queries = []
     for case in cases:
         started = time.perf_counter()
-        results = retriever.retrieve(case["query"], k)
+        results = retriever.retrieve(case["query"], candidates)
         results = rerank(results, case["query"], reranker_name, k)
         latency_ms = (time.perf_counter() - started) * 1000
+        titles = [doc.get("title", "") for doc in results]
         queries.append(
             {
                 "query": case["query"],
-                "retrieved": [doc.get("title", "") for doc in results],
+                "retrieved": titles,
                 "latency_ms": latency_ms,
-                **_metrics(results, case["relevant_docs"], k),
+                **retrieval_metrics(titles, case["relevant_docs"], k),
             }
         )
     metric_names = ("precision", "recall", "mrr", "ndcg", "latency_ms")
@@ -80,6 +76,7 @@ def evaluate(
         "retriever": retriever_name,
         "reranker": reranker_name,
         "k": k,
+        "candidates": candidates,
         "queries": queries,
         "aggregate": aggregate,
     }
@@ -90,10 +87,18 @@ def main() -> None:
     parser.add_argument("--retriever", choices=("bm25", "dense", "hybrid"), default="hybrid")
     parser.add_argument("--reranker", choices=("none", "cross_encoder"), default="none")
     parser.add_argument("--k", type=int, default=5)
+    parser.add_argument(
+        "--candidates",
+        type=int,
+        default=None,
+        help="documents retrieved before reranking (default: k, or max(k, 20) with a reranker)",
+    )
     args = parser.parse_args()
     if args.k < 1:
         parser.error("--k must be at least 1")
-    print(json.dumps(evaluate(args.retriever, args.reranker, args.k), indent=2))
+    if args.candidates is not None and args.candidates < args.k:
+        parser.error("--candidates must be >= --k")
+    print(json.dumps(evaluate(args.retriever, args.reranker, args.k, args.candidates), indent=2))
 
 
 if __name__ == "__main__":

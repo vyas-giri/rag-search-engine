@@ -68,7 +68,7 @@ class HybridSearch:
             semantic_rank = next((i for i, res in enumerate(ranked_semantic, start=1) if res["id"] == doc_id), None)
             bm25_rrf_score = rrf_score(bm25_rank, k) if bm25_rank is not None else 0
             semantic_rrf_score = rrf_score(semantic_rank, k) if semantic_rank is not None else 0
-            if bm25_rank is not None and semantic_rank is not None:
+            if bm25_rank is not None or semantic_rank is not None:
                 rrf_score_value = bm25_rrf_score + semantic_rrf_score
                 doc_copy = doc.copy()
                 doc_copy["bm25Rank"] = bm25_rank

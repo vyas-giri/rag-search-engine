@@ -1,18 +1,7 @@
-import os
-from dotenv import load_dotenv
-from openai import OpenAI
+from lib.llm_client import get_client
 from lib.constants import OPEN_ROUTER_FREE_MODEL
 
 
-load_dotenv()
-api_key = os.environ.get("OPENROUTER_API_KEY")
-if not api_key:
-    raise RuntimeError("OPENROUTER_API_KEY environment variable not set")
-
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=api_key,
-)
 
 prompts = {
     "spell": """Fix any spelling errors in the user-provided movie search query below.
@@ -77,7 +66,7 @@ def enhance_query(query: str, enhance: str) -> str:
 
 def correct_spelling(query: str) -> str:
     prompt = prompts["spell"].format(query=query)
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model=OPEN_ROUTER_FREE_MODEL,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -85,7 +74,7 @@ def correct_spelling(query: str) -> str:
 
 def rewrite_query(query: str) -> str:
     prompt = prompts["rewrite"].format(query=query)
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model=OPEN_ROUTER_FREE_MODEL,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -93,7 +82,7 @@ def rewrite_query(query: str) -> str:
 
 def expand_query(query: str) -> str:
     prompt = prompts["expand"].format(query=query)
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model=OPEN_ROUTER_FREE_MODEL,
         messages=[{"role": "user", "content": prompt}],
     )

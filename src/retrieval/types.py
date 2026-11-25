@@ -14,10 +14,15 @@ class RetrievedDocument(TypedDict, total=False):
     title: str
     description: str
     score: float
-    bm25Score: float
-    semanticScore: float
-    hybridScore: float
+    # BM25 (legacy key name kept for compatibility with cli/lib)
+    bm25_score: float
+    # Hybrid / RRF
     rrfScore: float
+    bm25Rank: int | None
+    semanticRank: int | None
+    sources: list[str]
+    # Reranking
+    crossEncoderScore: float
 
 
 class Retriever(Protocol):

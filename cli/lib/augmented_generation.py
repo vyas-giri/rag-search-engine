@@ -1,18 +1,7 @@
 from lib.constants import load_movies, OPEN_ROUTER_BASE_URL, OPEN_ROUTER_FREE_MODEL, DEFAULT_QUERY_LIMIT
 from lib.hybrid_search import HybridSearch
-import os
-from dotenv import load_dotenv
-from openai import OpenAI
+from lib.llm_client import get_client
 
-load_dotenv()
-api_key = os.environ.get("OPENROUTER_API_KEY")
-if not api_key:
-    raise RuntimeError("OPENROUTER_API_KEY environment variable not set")
-
-client = OpenAI(
-    base_url=OPEN_ROUTER_BASE_URL,
-    api_key=api_key,
-)
 
 promps: dict[str, str] = {
     "rag": """You are a RAG agent for Webflyx, a movie streaming service.
@@ -78,7 +67,7 @@ def augmented_generation(query: str, command: str, limit: int = DEFAULT_QUERY_LI
     results = hybrid_search.rrf_search(query, limit=limit)
 
     prompt = promps[command].format(query=query, results=results)
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model=OPEN_ROUTER_FREE_MODEL,
         messages=[{"role": "user", "content": prompt}],
     )
