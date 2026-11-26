@@ -15,10 +15,66 @@ reproducible retrieval benchmark.
 | LLM generation, query rewriting, LLM reranking | 🧪 Experimental | `cli/lib/` |
 | Multimodal (image → movie) search | 🧪 Experimental | `cli/lib/multimodal_search.py` |
 | Qdrant vector store (dense chunks, grouped by movie) | ✅ Done | `src/retrieval/vector_store.py` |
-| LangGraph agent (route → retrieve → grade → rewrite → generate) | ⏳ Phase 3 | |
+| LangGraph agent (route → retrieve → grade → rewrite → generate) | ✅ Done | `src/agents/` |
 | FastAPI service + Next.js UI | ⏳ Phase 4 | |
 | RAGAS answer evaluation | ⏳ Phase 5 | |
 | Langfuse tracing, Docker Compose, CI | ⏳ Phase 6 | |
+
+## Agent
+
+A LangGraph workflow (a simplified Corrective RAG) that decides whether to
+search, checks what it retrieved, rewrites weak queries, and answers only from
+cited catalog records.
+
+```mermaid
+graph TD
+  START([start]) --> route
+  route -.->|movie request| retrieve
+  route -.->|greeting / off-topic| respond_direct
+  retrieve --> grade
+  grade -.->|relevant docs| generate
+  grade -.->|none, retries left| rewrite
+  grade -.->|none, 2 rewrites used| insufficient
+  rewrite --> retrieve
+  generate --> END([end])
+  respond_direct --> END
+  insufficient --> END
+```
+
+| Node | What it does |
+|---|---|
+| `route` | LLM structured output (`retrieve` / `direct`); defaults to retrieve if the output is malformed |
+| `retrieve` | Hybrid BM25 + Qdrant dense search with RRF (falls back to in-process dense if Qdrant is down) |
+| `grade` | One LLM call grades all retrieved docs; ids the model invents are discarded |
+| `rewrite` | Rewrites the search query toward plot terms; at most 2 rewrites |
+| `generate` | Answers only from graded docs; citations not in the graded set are dropped, and an answer with no valid citation becomes an explicit "couldn't find" |
+| `respond_direct` / `insufficient` | Small talk and off-topic replies; fixed no-result answer |
+
+Guarantees enforced in code and covered by tests: every citation is a
+retrieved, graded document; the rewrite loop is bounded (plus a LangGraph
+recursion limit as a backstop); unsupported answers say so explicitly.
+
+```bash
+uv run python -m src.agents "that one where the guy is stuck alone on mars and grows potatoes"
+uv run python -m src.agents --json "family-friendly movie with bears"
+uv run python -m src.agents --mermaid   # print the graph
+```
+
+Live runs with `anthropic/claude-haiku-5.5` via OpenRouter:
+
+| Question | Path | Result |
+|---|---|---|
+| family-friendly movie with bears | route → retrieve → grade → generate | 4 cited Care Bears / bear films, ~9 s |
+| that one where the guy is stuck alone on mars and grows potatoes | route → retrieve → grade → generate | *The Martian*; notes the catalog text doesn't mention potatoes |
+| something where a fish dad crosses the whole ocean to find his kid | route → retrieve → grade → generate | *Finding Nemo* |
+| hi, what can you do? | route → respond_direct | capability summary, ~3 s |
+| what's the capital of France? | route → respond_direct | polite decline |
+| movies about competitive underwater chess tournaments | route → (retrieve → grade → rewrite) ×2 → retrieve → grade → insufficient | explicit "couldn't find", ~16 s |
+
+Hybrid retrieval resolved every vague query on the first attempt, so the
+rewrite-then-succeed path is exercised by the mocked tests rather than these
+examples. Unit tests (`tests/unit/test_agent.py`) script the LLM and retriever
+to cover every path, including malformed model output, without an API key.
 
 ## Retrieval benchmark
 
@@ -114,7 +170,7 @@ downloaded on first use. Setting `HF_TOKEN` avoids Hugging Face rate limits.
 (about 30 s, no re-embedding):
 
 ```bash
-docker compose up -d                        # Qdrant 1.20 on :6333, data in ./qdrant_storage
+docker compose up -d                        # Qdrant 1.20 on :6333, data in the qdrant_data volume
 uv run python -m src.retrieval.ingest       # add --recreate to rebuild
 curl -s localhost:6333/collections/movie_chunks   # expect points_count 72909
 ```
@@ -127,6 +183,7 @@ OpenRouter key in `.env` (never committed):
 
 ```env
 OPENROUTER_API_KEY=your_key_here
+AGENT_MODEL=anthropic/claude-haiku-5.5   # optional; any OpenRouter model with structured outputs
 ```
 
 Retrieval, evaluation and tests run without a key.
@@ -160,10 +217,11 @@ Each script supports `--help`.
 
 ```text
 src/
+  agents/        # LangGraph state, nodes, prompts, graph and CLI
   retrieval/     # Retriever protocol; BM25, dense, Qdrant, hybrid, fusion,
                  # reranker, ingest and evaluator
   evaluation/    # Ranking metrics
-tests/unit/      # Fusion, metrics, vector store and LLM-client tests
+tests/unit/      # Agent, fusion, metrics, vector store and LLM-client tests
 cli/             # Original CLI tools; cli/lib holds the underlying implementations
 docker-compose.yml
 ```
@@ -180,10 +238,8 @@ one capability at a time.
    Follow-up: BM25 as Qdrant sparse vectors (a movie-level collection with
    the IDF modifier), so that server-side prefetch + RRF fusion can be
    compared against the Python RRF and the BM25 bottleneck goes away.
-3. **Phase 3, agent:** a LangGraph workflow (route → retrieve → grade →
-   rewrite → generate) with bounded retries, an explicit
-   insufficient-information answer, and citations validated against
-   retrieved documents.
+3. **Phase 3, agent:** ✅ LangGraph workflow with bounded rewrites,
+   validated citations and an explicit no-result answer (see Agent above).
 4. **Phase 4, API and UI:** FastAPI `/chat` returning the answer, sources and
    the graph path taken, plus a Next.js chat UI.
 5. **Phase 5, evaluation:** RAGAS faithfulness, answer relevancy, and

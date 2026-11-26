@@ -6,5 +6,8 @@ services:
       - "6333:6333" # REST + dashboard at http://localhost:6333/dashboard
       - "6334:6334" # gRPC
     volumes:
-      - ./qdrant_storage:/qdrant/storage:z
+      - qdrant_data:/qdrant/storage
     restart: unless-stopped
+
+volumes:
+  qdrant_data: # Docker-managed; inspect with `docker volume inspect`
